@@ -1,50 +1,98 @@
 # path: ./convert_fp8_to_fp16.py
-# title: Safetensors FP8 to FP16 Converter
-# role: Converts all FP8 tensors within a .safetensors file to FP16 format, which is more compatible with Mac environments.
+# title: Safetensors FP8 to FP16 Converter with Progress Bar
+# role: Converts all FP8 tensors within a .safetensors file to FP16 format, 
+#       and displays progress for both conversion and saving processes.
 
 import argparse
+import json
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 from tqdm import tqdm
+
+
+def save_file_with_progress(
+    tensors: Dict[str, torch.Tensor],
+    filename: str,
+    metadata: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Saves tensors to a safetensors file with a progress bar for the I/O operation.
+    This function mimics the internal logic of safetensors.torch.save_file
+    but adds tqdm for progress visualization.
+    """
+    if metadata is None:
+        metadata = {}
+
+    # 1. Prepare header metadata
+    headers = {"__metadata__": metadata}
+    for name, tensor in tensors.items():
+        headers[name] = {
+            # PyTorch dtype like 'torch.float16' is serialized to just 'F16'
+            "dtype": str(tensor.dtype).split(".")[-1],
+            "shape": list(tensor.shape),
+        }
+
+    # 2. Serialize header to a JSON string
+    header_str = json.dumps(headers, separators=(",", ":"), ensure_ascii=False)
+    header_bytes = header_str.encode("utf-8")
+    
+    # Prepend header size (8-byte unsigned little-endian integer)
+    header_size_info = len(header_bytes).to_bytes(8, "little")
+
+    # 3. Calculate total file size for the progress bar
+    total_size = len(header_size_info) + len(header_bytes)
+    for tensor in tensors.values():
+        total_size += tensor.numel() * tensor.element_size()
+
+    print(f"変換後のファイルを保存中 (合計サイズ: {total_size / (1024*1024):.2f} MB): '{filename}'...")
+
+    # 4. Write to file with progress bar
+    with open(filename, "wb") as f, tqdm(
+        total=total_size,
+        desc="ファイルを保存中",
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as pbar:
+        # Write header size and header content
+        f.write(header_size_info)
+        f.write(header_bytes)
+        pbar.update(len(header_size_info) + len(header_bytes))
+
+        # Write each tensor's data sequentially
+        for tensor in tensors.values():
+            # Ensure tensor is on CPU and in a contiguous memory layout before saving
+            tensor_bytes = tensor.contiguous().cpu().numpy().tobytes()
+            f.write(tensor_bytes)
+            pbar.update(len(tensor_bytes))
 
 
 def convert_fp8_to_fp16(source_path: str, target_path: str) -> None:
     """
     Loads a safetensors file, converts all FP8 tensors to Float16,
     and saves the result to a new safetensors file.
-
-    Args:
-        source_path (str): The path to the source .safetensors file.
-        target_path (str): The path to save the converted .safetensors file.
     """
     if not os.path.exists(source_path):
         print(f"エラー: 指定されたソースファイルが見つかりません: '{source_path}'")
         return
 
     print(f"ファイルをロード中: '{source_path}'...")
-    # ファイル全体をCPUメモリにロードします。
-    # 巨大なファイルの場合、多くのメモリが必要になる点に注意してください。
     tensors: Dict[str, torch.Tensor] = load_file(source_path, device="cpu")
 
     converted_tensors: Dict[str, torch.Tensor] = {}
 
     print("テンソルをFP8からFP16へ変換中...")
-    # tqdmを使って進捗バーを表示します
     for name, tensor in tqdm(tensors.items(), desc="テンソルを処理中"):
-        # テンソルのデータ型がFP8の亜種（torch.float8_e4m3fnなど）かを確認します。
         if 'float8' in str(tensor.dtype):
-            # テンソルをFloat16（半精度）に変換します。
             converted_tensors[name] = tensor.to(torch.float16)
         else:
-            # FP8でない場合は、元のデータ型のまま保持します。
             converted_tensors[name] = tensor
-
-    print(f"変換後のファイルを保存中: '{target_path}'...")
-    # 変換されたテンソルを新しいファイルに保存します。
-    save_file(converted_tensors, target_path)
+    
+    # Use the new function with progress bar for saving
+    save_file_with_progress(converted_tensors, target_path)
 
     print("\n変換が完了しました！ ✨")
     try:
@@ -75,7 +123,6 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-
     convert_fp8_to_fp16(args.source_file, args.target_file)
 
 
