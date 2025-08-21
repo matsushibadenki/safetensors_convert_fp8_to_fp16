@@ -1,4 +1,4 @@
-# safetensors_convert_fp8_to_fp16
+# safetensors convert fp8 to fp16
 Comfyul is specialized for poor fp8 users, so it needs to be converted to fp16 in the MacOS environment.
 This script converts fp8 safetensors files to fp16.
 
